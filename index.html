@@ -157,6 +157,52 @@
     text-shadow: 2px 2px 6px rgba(0,0,0,0.5);
     pointer-events: none;
   }
+  #extraLifeBanner {
+    position: absolute;
+    top: 12px;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: center;
+    z-index: 15;
+    pointer-events: none;
+  }
+  #extraLifeBanner .gameBtn {
+    pointer-events: auto;
+    background: #16a34a;
+    padding: 8px 18px;
+    font-size: 15px;
+  }
+  #extraLifeBanner .gameBtn:hover { background: #15803d; }
+  .nameError {
+    color: #fca5a5;
+    font-weight: bold;
+    font-size: 14px;
+  }
+  .shopItem {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 14px;
+    padding: 12px 16px;
+    margin-top: 14px;
+    width: 100%;
+    max-width: 320px;
+    box-sizing: border-box;
+    text-align: left;
+  }
+  .shopItem .gameBtn {
+    padding: 8px 16px;
+    font-size: 14px;
+    white-space: nowrap;
+  }
+  .shopItem .gameBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+  }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -165,6 +211,7 @@
   <canvas id="game"></canvas>
   <div id="scoreDisplay">0</div>
   <div id="overlay"></div>
+  <div id="extraLifeBanner" class="hidden"><button class="gameBtn" id="extraLifeBtn" data-action="useExtraLife">Usar Vida Extra</button></div>
   <div id="kalanySplash" class="hidden"><img id="kalanySplashImg" alt="Kalany"></div>
 </div>
 
@@ -174,6 +221,7 @@ const ctx = canvas.getContext('2d');
 const overlay = document.getElementById('overlay');
 const scoreDisplay = document.getElementById('scoreDisplay');
 const kalanySplash = document.getElementById('kalanySplash');
+const extraLifeBanner = document.getElementById('extraLifeBanner');
 const gameContainer = document.getElementById('gameContainer');
 
 let W, H;
@@ -288,6 +336,8 @@ function resetGame() {
   scoreDisplay.textContent = '0';
   pipeSpawnTimer = -40;
   lastTime = null;
+  justDied = false;
+  updateExtraLifeBanner();
 }
 
 function lsGet(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
@@ -305,6 +355,10 @@ function getOrCreatePlayerId() {
 const playerId = getOrCreatePlayerId();
 let playerName = lsGet('flappyFacePlayerName');
 best = parseInt(lsGet('flappyFaceBest') || '0', 10) || 0;
+let coins = parseInt(lsGet('flappyFaceCoins') || '0', 10) || 0;
+let extraLives = parseInt(lsGet('flappyFaceExtraLives') || '0', 10) || 0;
+let justDied = false;
+const EXTRA_LIFE_COST = 500;
 
 const RANKING_API = 'https://flappy-ranking.168.138.131.164.sslip.io';
 
@@ -334,6 +388,7 @@ function submitScore(finalScore) {
   if (backend === 'artifact' && db) {
     db.collection('ranking').doc(playerId).set({
       name: playerName,
+      nameLower: playerName.toLowerCase(),
       best: best,
       updatedAt: new Date().toISOString()
     }).catch(() => {});
@@ -346,13 +401,30 @@ function submitScore(finalScore) {
   }
 }
 
+async function isNameTaken(name) {
+  const lower = name.toLowerCase();
+  try {
+    if (backend === 'artifact' && db) {
+      const snap = await db.collection('ranking').where('nameLower', '==', lower).limit(5).get();
+      return snap.docs.some(d => d.id !== playerId);
+    } else if (backend === 'api') {
+      const res = await fetch(RANKING_API + '/ranking?name=ilike.' + encodeURIComponent(name) + '&select=player_id');
+      if (!res.ok) return false;
+      const rows = await res.json();
+      return rows.some(r => r.player_id !== playerId);
+    }
+  } catch (e) {}
+  return false;
+}
+
 function flap() {
   try { ensureAudio(); } catch (e) {}
   face.vy = flapStrength;
   playFlapSound();
 }
 
-let rankingReturnState = 'ready';
+let menuReturnState = 'ready';
+let nameError = '';
 
 function renderOverlay() {
   if (gameState === 'playing' || gameState === 'splash') {
@@ -365,6 +437,7 @@ function renderOverlay() {
       <h1>Flappy Face</h1>
       <p>Antes de começar, qual é o seu nome?</p>
       <input type="text" id="nameInput" maxlength="16" placeholder="Seu nome" autocomplete="off">
+      ${nameError ? `<p class="nameError">${escapeHtml(nameError)}</p>` : ''}
       <div class="btnRow">
         <button class="gameBtn" data-action="confirmName">Confirmar</button>
       </div>
@@ -378,9 +451,11 @@ function renderOverlay() {
       <p>Olá, ${escapeHtml(playerName || '')}!</p>
       <p>Toque ou aperte espaço para voar</p>
       <p>Desvie dos canos!</p>
+      <p>Moedas: ${coins}</p>
       <div class="btnRow">
         <button class="gameBtn" data-action="play">Jogar</button>
         <button class="gameBtn secondary" data-action="ranking">Ranking</button>
+        <button class="gameBtn secondary" data-action="shop">Loja</button>
       </div>
     `;
   } else if (gameState === 'over') {
@@ -388,9 +463,11 @@ function renderOverlay() {
       <h1>Fim de jogo!</h1>
       <p>Pontuação: ${score}</p>
       <p>Seu recorde: ${best}</p>
+      <p>Moedas: ${coins}</p>
       <div class="btnRow">
         <button class="gameBtn" data-action="play">Jogar novamente</button>
         <button class="gameBtn secondary" data-action="ranking">Ranking</button>
+        <button class="gameBtn secondary" data-action="shop">Loja</button>
       </div>
     `;
   } else if (gameState === 'ranking') {
@@ -398,20 +475,47 @@ function renderOverlay() {
       <h1>Ranking</h1>
       <div id="rankingList">Carregando...</div>
       <div class="btnRow">
-        <button class="gameBtn secondary" data-action="closeRanking">Voltar</button>
+        <button class="gameBtn secondary" data-action="closeMenu">Voltar</button>
       </div>
     `;
     loadRanking();
+  } else if (gameState === 'shop') {
+    overlay.innerHTML = `
+      <h1>Loja</h1>
+      <p>Moedas: ${coins}</p>
+      <div class="shopItem">
+        <div>
+          <strong>Vida Extra</strong>
+          <p class="smallNote">Ao morrer, continue com a mesma pontuação (cenário reinicia). Você tem: ${extraLives}</p>
+        </div>
+        <button class="gameBtn" data-action="buyExtraLife" ${coins < EXTRA_LIFE_COST ? 'disabled' : ''}>Comprar (${EXTRA_LIFE_COST})</button>
+      </div>
+      <div class="btnRow">
+        <button class="gameBtn secondary" data-action="closeMenu">Voltar</button>
+      </div>
+    `;
   }
 }
 
-function confirmName() {
+async function confirmName() {
   const input = document.getElementById('nameInput');
   if (!input) return;
   const name = input.value.trim().slice(0, 16);
   if (!name) { input.focus(); return; }
+  const btn = overlay.querySelector('[data-action="confirmName"]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Verificando...'; }
+  const taken = await isNameTaken(name);
+  if (taken) {
+    nameError = 'Esse nome já está em uso. Escolha outro.';
+    renderOverlay();
+    const retryInput = document.getElementById('nameInput');
+    if (retryInput) retryInput.value = name;
+    return;
+  }
+  nameError = '';
   playerName = name;
   lsSet('flappyFacePlayerName', name);
+  submitScore(best);
   gameState = 'ready';
   renderOverlay();
 }
@@ -435,15 +539,56 @@ function handlePlayClick() {
   });
 }
 
+function continueWithExtraLife() {
+  if (extraLives < 1) return;
+  extraLives -= 1;
+  lsSet('flappyFaceExtraLives', String(extraLives));
+  const savedScore = score;
+  try { ensureAudio(); } catch (e) {}
+  resetGame();
+  score = savedScore;
+  scoreDisplay.textContent = String(score);
+  showKalanySplash(() => {
+    gameState = 'playing';
+    overlay.classList.add('hidden');
+  });
+}
+
+function buyExtraLife() {
+  if (coins < EXTRA_LIFE_COST) return;
+  coins -= EXTRA_LIFE_COST;
+  extraLives += 1;
+  lsSet('flappyFaceCoins', String(coins));
+  lsSet('flappyFaceExtraLives', String(extraLives));
+  renderOverlay();
+  updateExtraLifeBanner();
+}
+
 function openRanking() {
-  rankingReturnState = gameState;
+  menuReturnState = gameState;
   gameState = 'ranking';
   renderOverlay();
 }
 
-function closeRanking() {
-  gameState = rankingReturnState;
+function openShop() {
+  menuReturnState = gameState;
+  gameState = 'shop';
   renderOverlay();
+}
+
+function closeMenu() {
+  gameState = menuReturnState;
+  renderOverlay();
+}
+
+function updateExtraLifeBanner() {
+  if (justDied && extraLives >= 1) {
+    const btn = document.getElementById('extraLifeBtn');
+    if (btn) btn.textContent = `Usar Vida Extra (${extraLives})`;
+    extraLifeBanner.classList.remove('hidden');
+  } else {
+    extraLifeBanner.classList.add('hidden');
+  }
 }
 
 async function loadRanking() {
@@ -527,6 +672,8 @@ function update(dtScale) {
     if (!p.passed && p.x + p.width < face.x - face.size/2) {
       p.passed = true;
       score++;
+      coins++;
+      lsSet('flappyFaceCoins', String(coins));
       scoreDisplay.textContent = score;
       triggerHatCelebration();
     }
@@ -552,9 +699,11 @@ function update(dtScale) {
 function gameOver() {
   if (gameState === 'over') return;
   gameState = 'over';
+  justDied = true;
   playDeathSound();
   submitScore(score);
   renderOverlay();
+  updateExtraLifeBanner();
 }
 
 function drawBackground() {
@@ -707,16 +856,25 @@ window.addEventListener('keydown', (e) => {
 
 overlay.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-action]');
-  if (!btn) return;
+  if (!btn || btn.disabled) return;
   e.preventDefault();
   const action = btn.dataset.action;
   if (action === 'confirmName') confirmName();
   else if (action === 'play') handlePlayClick();
   else if (action === 'ranking') openRanking();
-  else if (action === 'closeRanking') closeRanking();
+  else if (action === 'shop') openShop();
+  else if (action === 'closeMenu') closeMenu();
+  else if (action === 'buyExtraLife') buyExtraLife();
 });
 overlay.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && gameState === 'name') confirmName();
+});
+
+extraLifeBanner.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-action="useExtraLife"]');
+  if (!btn) return;
+  e.preventDefault();
+  continueWithExtraLife();
 });
 
 function initGame() {
