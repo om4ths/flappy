@@ -306,13 +306,19 @@ const playerId = getOrCreatePlayerId();
 let playerName = lsGet('flappyFacePlayerName');
 best = parseInt(lsGet('flappyFaceBest') || '0', 10) || 0;
 
+const RANKING_API = 'https://flappy-ranking.168.138.131.164.sslip.io';
+
 let db = null;
-async function initDb() {
+let backend = 'local';
+
+async function initBackend() {
   try {
     if (window.claude && typeof window.claude.use === 'function') {
-      db = await window.claude.use('db');
+      const d = await window.claude.use('db');
+      if (d) { db = d; backend = 'artifact'; return; }
     }
-  } catch (e) { db = null; }
+  } catch (e) {}
+  backend = 'api';
 }
 
 function escapeHtml(str) {
@@ -324,12 +330,20 @@ function submitScore(finalScore) {
     best = finalScore;
     lsSet('flappyFaceBest', String(best));
   }
-  if (!db || !playerName) return;
-  db.collection('ranking').doc(playerId).set({
-    name: playerName,
-    best: best,
-    updatedAt: new Date().toISOString()
-  }).catch(() => {});
+  if (!playerName) return;
+  if (backend === 'artifact' && db) {
+    db.collection('ranking').doc(playerId).set({
+      name: playerName,
+      best: best,
+      updatedAt: new Date().toISOString()
+    }).catch(() => {});
+  } else if (backend === 'api') {
+    fetch(RANKING_API + '/ranking?on_conflict=player_id', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates' },
+      body: JSON.stringify({ player_id: playerId, name: playerName, best: best, updated_at: new Date().toISOString() })
+    }).catch(() => {});
+  }
 }
 
 function flap() {
@@ -433,29 +447,52 @@ function closeRanking() {
 }
 
 async function loadRanking() {
-  if (!db) {
-    const el = document.getElementById('rankingList');
-    if (el) el.textContent = 'Ranking global indisponível nesta versão (abra pelo link publicado). Seu recorde: ' + best;
+  const el = document.getElementById('rankingList');
+  if (backend === 'artifact' && db) {
+    try {
+      const snap = await db.collection('ranking').orderBy('best', 'desc').limit(10).get();
+      const el2 = document.getElementById('rankingList');
+      if (!el2) return;
+      if (snap.empty) {
+        el2.textContent = 'Ninguém pontuou ainda!';
+        return;
+      }
+      el2.innerHTML = snap.docs.map((d, i) => {
+        const data = d.data() || {};
+        const name = escapeHtml(String(data.name || '???')).slice(0, 32);
+        const scoreVal = Number(data.best) || 0;
+        const mine = d.id === playerId ? ' me' : '';
+        return `<div class="rankRow${mine}"><span>${i + 1}. ${name}</span><span>${scoreVal}</span></div>`;
+      }).join('');
+    } catch (e) {
+      const el2 = document.getElementById('rankingList');
+      if (el2) el2.textContent = 'Erro ao carregar ranking.';
+    }
+    return;
+  }
+  if (backend !== 'api') {
+    if (el) el.textContent = 'Ranking indisponível. Seu recorde: ' + best;
     return;
   }
   try {
-    const snap = await db.collection('ranking').orderBy('best', 'desc').limit(10).get();
-    const el = document.getElementById('rankingList');
-    if (!el) return;
-    if (snap.empty) {
-      el.textContent = 'Ninguém pontuou ainda!';
+    const res = await fetch(RANKING_API + '/ranking?select=player_id,name,best&order=best.desc&limit=10');
+    if (!res.ok) throw new Error('bad status');
+    const rows = await res.json();
+    const el2 = document.getElementById('rankingList');
+    if (!el2) return;
+    if (!rows.length) {
+      el2.textContent = 'Ninguém pontuou ainda!';
       return;
     }
-    el.innerHTML = snap.docs.map((d, i) => {
-      const data = d.data() || {};
-      const name = escapeHtml(String(data.name || '???')).slice(0, 32);
-      const scoreVal = Number(data.best) || 0;
-      const mine = d.id === playerId ? ' me' : '';
+    el2.innerHTML = rows.map((row, i) => {
+      const name = escapeHtml(String(row.name || '???')).slice(0, 32);
+      const scoreVal = Number(row.best) || 0;
+      const mine = row.player_id === playerId ? ' me' : '';
       return `<div class="rankRow${mine}"><span>${i + 1}. ${name}</span><span>${scoreVal}</span></div>`;
     }).join('');
   } catch (e) {
-    const el = document.getElementById('rankingList');
-    if (el) el.textContent = 'Erro ao carregar ranking.';
+    const el2 = document.getElementById('rankingList');
+    if (el2) el2.textContent = 'Erro ao carregar ranking.';
   }
 }
 
@@ -690,7 +727,7 @@ function initGame() {
     if (splashImg) splashImg.src = kalanyImg.src;
     if (!playerName) gameState = 'name';
     renderOverlay();
-    initDb();
+    initBackend();
     requestAnimationFrame(loop);
   } catch (err) {
     ctx.fillStyle = '#fff';
